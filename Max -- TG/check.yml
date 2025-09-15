@@ -1,0 +1,82 @@
+name: max-check-15min
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Try to download previously uploaded artifact (max-state)
+        uses: actions/download-artifact@v5
+        with:
+          name: max-state
+          path: ./artifact || true
+
+      - name: Try to download last_seen artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: max-last-seen
+          path: ./artifact_lastseen || true
+
+      - name: Decrypt artifacts or repo-stored encrypted files
+        env:
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
+        run: |
+          set -e
+          # Prioritize artifact if exists
+          if [ -f ./artifact/state.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
+          elif [ -f ./secrets/state.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
+          fi
+
+          if [ -f ./artifact_lastseen/last_seen.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact_lastseen/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
+          elif [ -f ./secrets/last_seen.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checker
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+        run: |
+          node checker.js
+
+      - name: Encrypt storageState.json and last_seen.json
+        env:
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
+        run: |
+          mkdir -p out
+          if [ -f storageState.json ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -salt -in storageState.json -out out/state.enc -pass pass:"$ENCRYPT_KEY"
+          fi
+          if [ -f last_seen.json ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -salt -in last_seen.json -out out/last_seen.enc -pass pass:"$ENCRYPT_KEY"
+          fi
+
+      - name: Upload encrypted state artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: max-state
+          path: out/state.enc
+
+      - name: Upload encrypted last_seen artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: max-last-seen
+          path: out/last_seen.enc
