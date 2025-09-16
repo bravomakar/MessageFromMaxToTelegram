@@ -1,7 +1,7 @@
 name: max-check-15min
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
 
 jobs:
   check:
@@ -80,3 +80,4 @@ jobs:
         with:
           name: max-last-seen
           path: out/last_seen.enc
+
