@@ -21,9 +21,17 @@ jobs:
         with:
           node-version: '18'
 
-      - name: Install dependencies
+      - name: Install dependencies (with fallback) and Playwright browsers
         run: |
-          npm ci
+          if [ -f package-lock.json ]; then
+            echo "Found package-lock.json -> running npm ci"
+            npm ci --no-audit --no-fund
+          else
+            echo "No package-lock.json -> running npm install"
+            npm install --no-audit --no-fund
+          fi
+          # install playwright browsers (with deps) — опционально, но часто нужен
+          npx playwright install --with-deps
 
       - name: Download previous state (artifact) if exists
         uses: actions/download-artifact@v5
@@ -87,3 +95,4 @@ jobs:
         with:
           name: max-last-seen
           path: out/last_seen.enc
+
