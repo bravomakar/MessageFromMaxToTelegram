@@ -79,6 +79,20 @@ jobs:
             echo '{ "chats": {} }' > last_seen.json
           fi
 
+      - name: Debug decrypted files
+        run: |
+          echo "=== Debug decrypted files ==="
+          echo "PWD: $(pwd)"
+          echo "storageState.json exists: $( [ -f storageState.json ] && echo yes || echo no )"
+          echo "last_seen.json exists: $( [ -f last_seen.json ] && echo yes || echo no )"
+          echo "ls -la:"
+          ls -la || true
+          if [ -f last_seen.json ]; then
+            echo "last_seen.json size:" $(wc -c < last_seen.json)
+            echo "last_seen keys (jq):"
+            cat last_seen.json | jq -c '.chats | keys' || cat last_seen.json | head -n 40
+          fi          
+
       - name: Install dependencies (use lockfile if present) and Playwright browsers if needed
         run: |
           set -e
@@ -117,6 +131,17 @@ jobs:
             openssl enc -aes-256-cbc -pbkdf2 -salt -in last_seen.json -out out/last_seen.enc -pass pass:"$ENCRYPT_KEY"
           fi
 
+      - name: Show out/ before upload
+        run: |
+          echo "Listing out/ directory:"
+          ls -la out || true
+          if [ -f out/last_seen.enc ]; then
+            echo "out/last_seen.enc size:" $(stat -c%s out/last_seen.enc)
+          fi
+          if [ -f out/state.enc ]; then
+            echo "out/state.enc size:" $(stat -c%s out/state.enc)
+          fi
+
       - name: Try to download previous state artifact (max-state) - non-fatal
         uses: actions/download-artifact@v5
         with:
@@ -130,5 +155,6 @@ jobs:
           name: max-last-seen
           path: ./artifact_lastseen
         continue-on-error: true
+
 
 
