@@ -1,13 +1,12 @@
 name: max-check-15min
+
 on:
   schedule:
-    - cron: "*/15 * * * *"    # каждые 15 минут (UTC)
-  workflow_dispatch:          # позволяет вручную запустить workflow в Actions UI
+    - cron: "*/15 * * * *"  # каждые 15 минут
+  workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read
-  id-token: write
 
 jobs:
   check:
@@ -21,8 +20,68 @@ jobs:
         with:
           node-version: '18'
 
-      - name: Install dependencies (with fallback) and Playwright browsers
+      - name: Cache node modules
+        id: cache-node
+        uses: actions/cache@v4
+        with:
+          path: |
+            **/node_modules
+            ~/.npm
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-modules-
+
+      - name: Cache Playwright browsers
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-browsers-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-browsers-
+
+      - name: Try to download previous state artifact (max-state) - non-fatal
+        uses: actions/download-artifact@v5
+        with:
+          name: max-state
+          path: ./artifact
+        continue-on-error: true
+
+      - name: Try to download previous last_seen artifact (max-last-seen) - non-fatal
+        uses: actions/download-artifact@v5
+        with:
+          name: max-last-seen
+          path: ./artifact_lastseen
+        continue-on-error: true
+
+      - name: Decrypt artifacts or repo-stored encrypted files
+        env:
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: |
+          set -e
+          echo "Attempting to decrypt state from downloaded artifact..."
+          if [ -f ./artifact/state.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
+          elif [ -f ./secrets/state.enc ]; then
+            echo "No artifact found — falling back to repo secrets/state.enc"
+            openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
+          else
+            echo "No state.enc found in artifact or repo; continuing without storageState.json"
+          fi
+
+          echo "Attempting to decrypt last_seen..."
+          if [ -f ./artifact_lastseen/last_seen.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact_lastseen/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
+          elif [ -f ./secrets/last_seen.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
+          else
+            echo "No last_seen.enc found in artifact or repo; creating default last_seen.json"
+            echo '{ "chats": {} }' > last_seen.json
+          fi
+
+      - name: Install dependencies (use lockfile if present) and Playwright browsers if needed
+        run: |
+          set -e
           if [ -f package-lock.json ]; then
             echo "Found package-lock.json -> running npm ci"
             npm ci --no-audit --no-fund
@@ -30,37 +89,13 @@ jobs:
             echo "No package-lock.json -> running npm install"
             npm install --no-audit --no-fund
           fi
-          # install playwright browsers (with deps) — опционально, но часто нужен
-          npx playwright install --with-deps
 
-      - name: Download previous state (artifact) if exists
-        uses: actions/download-artifact@v5
-        with:
-          name: max-state
-          path: ./artifact || true
-
-      - name: Download previous last_seen (artifact) if exists
-        uses: actions/download-artifact@v5
-        with:
-          name: max-last-seen
-          path: ./artifact_lastseen || true
-
-      - name: Decrypt artifacts or repo-stored encrypted files
-        env:
-          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
-        run: |
-          set -e
-          # Prefer downloaded artifact
-          if [ -f ./artifact/state.enc ]; then
-            openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
-          elif [ -f ./secrets/state.enc ]; then
-            openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
-          fi
-
-          if [ -f ./artifact_lastseen/last_seen.enc ]; then
-            openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact_lastseen/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
-          elif [ -f ./secrets/last_seen.enc ]; then
-            openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
+          # Install Playwright browsers only if cache miss
+          if [ "${{ steps.cache-playwright.outputs.cache-hit }}" != 'true' ]; then
+            echo "Playwright browsers cache miss -> installing browsers"
+            npx playwright install --with-deps
+          else
+            echo "Playwright browsers restored from cache"
           fi
 
       - name: Run checker
@@ -70,7 +105,7 @@ jobs:
         run: |
           node checker.js
 
-      - name: Encrypt storageState.json and last_seen.json
+      - name: Encrypt storageState.json and last_seen.json (for next run)
         env:
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: |
@@ -95,4 +130,3 @@ jobs:
         with:
           name: max-last-seen
           path: out/last_seen.enc
-
