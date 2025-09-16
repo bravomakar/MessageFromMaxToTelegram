@@ -117,17 +117,18 @@ jobs:
             openssl enc -aes-256-cbc -pbkdf2 -salt -in last_seen.json -out out/last_seen.enc -pass pass:"$ENCRYPT_KEY"
           fi
 
-      - name: Upload encrypted state artifact
-        if: success()
-        uses: actions/upload-artifact@v4
+      - name: Try to download previous state artifact (max-state) - non-fatal
+        uses: actions/download-artifact@v5
         with:
           name: max-state
-          path: out/state.enc
+          path: ./artifact
+        continue-on-error: true
 
-      - name: Upload encrypted last_seen artifact
-        if: success()
-        uses: actions/upload-artifact@v4
+      - name: Try to download previous last_seen artifact (max-last-seen) - non-fatal
+        uses: actions/download-artifact@v5
         with:
           name: max-last-seen
-          path: out/last_seen.enc
+          path: ./artifact_lastseen
+        continue-on-error: true
+
 
