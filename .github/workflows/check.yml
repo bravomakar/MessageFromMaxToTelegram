@@ -1,8 +1,8 @@
 name: max-check-15min
 
 on:
-#  schedule:
-#    - cron: "*/15 * * * *"  # каждые 15 минут
+  # schedule:
+  #   - cron: "*/15 * * * *"  # каждые 15 минут
   workflow_dispatch:
 
 permissions:
@@ -38,7 +38,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-browsers-${{ hashFiles('package-lock.json') }}
           restore-keys: |
-            ${{ runner.os }}-playwright-browsers-
+            ${{ runner.os }}-playwright-brows-
 
       - name: Try to download previous state artifact (max-state) - non-fatal
         uses: actions/download-artifact@v5
@@ -91,7 +91,7 @@ jobs:
             echo "last_seen.json size:" $(wc -c < last_seen.json)
             echo "last_seen keys (jq):"
             cat last_seen.json | jq -c '.chats | keys' || cat last_seen.json | head -n 40
-          fi          
+          fi
 
       - name: Install dependencies (use lockfile if present) and Playwright browsers if needed
         run: |
@@ -142,19 +142,16 @@ jobs:
             echo "out/state.enc size:" $(stat -c%s out/state.enc)
           fi
 
-      - name: Try to download previous state artifact (max-state) - non-fatal
-        uses: actions/download-artifact@v5
+      - name: Upload encrypted state artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: max-state
-          path: ./artifact
-        continue-on-error: true
+          path: out/state.enc
 
-      - name: Try to download previous last_seen artifact (max-last-seen) - non-fatal
-        uses: actions/download-artifact@v5
+      - name: Upload encrypted last_seen artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: max-last-seen
-          path: ./artifact_lastseen
-        continue-on-error: true
-
-
-
+          path: out/last_seen.enc
