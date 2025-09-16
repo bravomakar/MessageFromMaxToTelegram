@@ -1,7 +1,13 @@
 name: max-check-15min
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/15 * * * *"    # каждые 15 минут (UTC)
+  workflow_dispatch:          # позволяет вручную запустить workflow в Actions UI
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
 
 jobs:
   check:
@@ -10,13 +16,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Try to download previously uploaded artifact (max-state)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+
+      - name: Download previous state (artifact) if exists
         uses: actions/download-artifact@v5
         with:
           name: max-state
           path: ./artifact || true
 
-      - name: Try to download last_seen artifact
+      - name: Download previous last_seen (artifact) if exists
         uses: actions/download-artifact@v5
         with:
           name: max-last-seen
@@ -27,7 +42,7 @@ jobs:
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: |
           set -e
-          # Prioritize artifact if exists
+          # Prefer downloaded artifact
           if [ -f ./artifact/state.enc ]; then
             openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
           elif [ -f ./secrets/state.enc ]; then
@@ -39,14 +54,6 @@ jobs:
           elif [ -f ./secrets/last_seen.enc ]; then
             openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
           fi
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Install dependencies
-        run: npm ci
 
       - name: Run checker
         env:
@@ -80,4 +87,3 @@ jobs:
         with:
           name: max-last-seen
           path: out/last_seen.enc
-
