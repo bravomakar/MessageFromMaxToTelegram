@@ -2,7 +2,7 @@ name: max-check-15min
 
 on:
   schedule:
-    - cron: "*/8 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 # Нужны права на запись, чтобы workflow мог пушить обновлённые secrets/* (если вы хотите использовать GITHUB_TOKEN)
@@ -207,6 +207,7 @@ jobs:
             echo "No out/*.enc files to commit"
           fi
         shell: bash
+
 
 
 
