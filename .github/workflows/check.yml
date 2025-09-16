@@ -16,7 +16,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 7
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -212,6 +212,7 @@ jobs:
             echo "No out/*.enc files to commit"
           fi
         shell: bash
+
 
 
 
