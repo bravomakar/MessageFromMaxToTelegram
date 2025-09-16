@@ -1,10 +1,12 @@
 name: max-check-15min
 
 on:
+  # Раскомментируйте cron, когда убедитесь, что всё стабильно
   # schedule:
-  #   - cron: "*/15 * * * *"  # каждые 15 минут
+  #   - cron: "*/15 * * * *"
   workflow_dispatch:
 
+# Нужны права на запись, чтобы workflow мог пушить обновлённые secrets/* (если вы хотите использовать GITHUB_TOKEN)
 permissions:
   contents: write
 
@@ -14,6 +16,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -85,7 +89,7 @@ jobs:
           echo "PWD: $(pwd)"
           echo "storageState.json exists: $( [ -f storageState.json ] && echo yes || echo no )"
           echo "last_seen.json exists: $( [ -f last_seen.json ] && echo yes || echo no )"
-          echo "ls -la:"
+          echo "ls -la root:"
           ls -la || true
           if [ -f last_seen.json ]; then
             echo "last_seen.json size:" $(wc -c < last_seen.json)
@@ -123,6 +127,7 @@ jobs:
         env:
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: |
+          set -e
           mkdir -p out
           if [ -f storageState.json ]; then
             openssl enc -aes-256-cbc -pbkdf2 -salt -in storageState.json -out out/state.enc -pass pass:"$ENCRYPT_KEY"
@@ -142,44 +147,6 @@ jobs:
             echo "out/state.enc size:" $(stat -c%s out/state.enc)
           fi
 
-
-      - name: Commit encrypted state back to repo (secrets/)
-        if: always()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-
-          # move files into repo secrets/ so next run will decrypt them from repo
-          mkdir -p secrets
-          CHANGED=0
-          if [ -f out/state.enc ]; then
-            mv out/state.enc secrets/state.enc
-            git add secrets/state.enc || true
-            CHANGED=1
-          fi
-          if [ -f out/last_seen.enc ]; then
-            mv out/last_seen.enc secrets/last_seen.enc
-            git add secrets/last_seen.enc || true
-            CHANGED=1
-          fi
-
-          if [ "$CHANGED" -eq 1 ]; then
-            # Commit only if there are changes
-            if git diff --cached --quiet; then
-              echo "No changes to commit"
-            else
-              git commit -m "Update encrypted state (last_seen/state) [ci skip]"
-              # push; uses the automatic token for auth
-              git push origin HEAD:${{ github.ref_name }}
-              echo "Pushed updated secrets/* to repo"
-            fi
-          else
-            echo "No out/*.enc files to commit"
-          fi
-
       - name: Upload encrypted state artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -194,4 +161,50 @@ jobs:
           name: max-last-seen
           path: out/last_seen.enc
 
+      - name: Commit encrypted state back to repo (secrets/) — copy & push (PAT preferred)
+        if: always()
+        env:
+          REPO_PAT: ${{ secrets.REPO_PAT }}         # optional: Personal Access Token (more reliable for push)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # builtin token
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
 
+          mkdir -p secrets
+          CHANGED=0
+
+          # copy (not move) so upload has the files
+          if [ -f out/state.enc ]; then
+            cp out/state.enc secrets/state.enc
+            git add secrets/state.enc || true
+            CHANGED=1
+          fi
+          if [ -f out/last_seen.enc ]; then
+            cp out/last_seen.enc secrets/last_seen.enc
+            git add secrets/last_seen.enc || true
+            CHANGED=1
+          fi
+
+          if [ "$CHANGED" -eq 1 ]; then
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+            else
+              git commit -m "Update encrypted state (last_seen/state) [ci skip]"
+              # choose auth method: PAT (if provided) else GITHUB_TOKEN
+              if [ -n "$REPO_PAT" ]; then
+                echo "Pushing using REPO_PAT"
+                git remote set-url origin "https://x-access-token:${REPO_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+              else
+                echo "Pushing using GITHUB_TOKEN"
+                git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+              fi
+              git push origin "HEAD:${BRANCH_NAME}" || (echo "Push failed" && exit 0)
+              echo "Pushed updated secrets/* to repo (branch: ${BRANCH_NAME})"
+            fi
+          else
+            echo "No out/*.enc files to commit"
+          fi
+        shell: bash
