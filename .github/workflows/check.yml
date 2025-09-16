@@ -142,6 +142,44 @@ jobs:
             echo "out/state.enc size:" $(stat -c%s out/state.enc)
           fi
 
+
+      - name: Commit encrypted state back to repo (secrets/)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          # move files into repo secrets/ so next run will decrypt them from repo
+          mkdir -p secrets
+          CHANGED=0
+          if [ -f out/state.enc ]; then
+            mv out/state.enc secrets/state.enc
+            git add secrets/state.enc || true
+            CHANGED=1
+          fi
+          if [ -f out/last_seen.enc ]; then
+            mv out/last_seen.enc secrets/last_seen.enc
+            git add secrets/last_seen.enc || true
+            CHANGED=1
+          fi
+
+          if [ "$CHANGED" -eq 1 ]; then
+            # Commit only if there are changes
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+            else
+              git commit -m "Update encrypted state (last_seen/state) [ci skip]"
+              # push; uses the automatic token for auth
+              git push origin HEAD:${{ github.ref_name }}
+              echo "Pushed updated secrets/* to repo"
+            fi
+          else
+            echo "No out/*.enc files to commit"
+          fi
+
       - name: Upload encrypted state artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -155,3 +193,4 @@ jobs:
         with:
           name: max-last-seen
           path: out/last_seen.enc
+
