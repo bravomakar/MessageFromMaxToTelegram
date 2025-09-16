@@ -1,8 +1,8 @@
 name: max-check-15min
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"  # каждые 15 минут
+#  schedule:
+#    - cron: "*/15 * * * *"  # каждые 15 минут
   workflow_dispatch:
 
 permissions:
@@ -130,3 +130,4 @@ jobs:
         with:
           name: max-last-seen
           path: out/last_seen.enc
+
