@@ -1,8 +1,8 @@
 name: max-check-10min
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"   # каждые 10 минут
+#  schedule:
+#    - cron: "*/10 * * * *"   # каждые 10 минут
   workflow_dispatch:
     inputs:
       test_pat:
