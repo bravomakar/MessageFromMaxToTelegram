@@ -1,27 +1,70 @@
-name: max-check-15min
+name: max-check-10min
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *"   # каждые 10 минут
   workflow_dispatch:
+    inputs:
+      test_pat:
+        description: 'Проверить REPO_PAT (true/false)'
+        required: false
+        default: 'false'
 
-# Нужны права на запись, чтобы workflow мог пушить обновлённые secrets/* (если вы хотите использовать GITHUB_TOKEN)
 permissions:
   contents: write
 
 concurrency:
-  group: max-check-15min-${{ github.ref }}
+  group: max-check-10min
   cancel-in-progress: true
 
 jobs:
+  # ---------- optional PAT test job ----------
+  pat-check:
+    # запускается только вручную при workflow_dispatch с input test_pat == 'true'
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.test_pat == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show environment info
+        run: |
+          echo "Run triggered by: $GITHUB_ACTOR / $GITHUB_EVENT_NAME"
+          echo "Testing REPO_PAT availability..."
+
+      - name: Test REPO_PAT by calling GitHub API /user
+        env:
+          REPO_PAT: ${{ secrets.REPO_PAT }}
+        run: |
+          if [ -z "$REPO_PAT" ]; then
+            echo "REPO_PAT secret is not set. Please add it to repository secrets."
+            exit 1
+          fi
+          echo "Calling https://api.github.com/user to verify token..."
+          http_status=$(curl -s -o /tmp/pat_out.json -w "%{http_code}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $REPO_PAT" \
+            https://api.github.com/user)
+
+          echo "HTTP status: $http_status"
+          if [ "$http_status" -ne 200 ]; then
+            echo "PAT test failed. Response:"
+            cat /tmp/pat_out.json || true
+            exit 1
+          fi
+
+          echo "PAT is valid. Authenticated user info:"
+          jq -r '.login, .id, .name' /tmp/pat_out.json || cat /tmp/pat_out.json
+
+  # ---------- main checker job ----------
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    needs: [pat-check]   # pat-check runs only when triggered; if not triggered it's skipped
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Show start time
+        run: echo "Run started at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -168,8 +211,8 @@ jobs:
       - name: Commit encrypted state back to repo (secrets/) — copy & push (PAT preferred)
         if: always()
         env:
-          REPO_PAT: ${{ secrets.REPO_PAT }}         # optional: Personal Access Token (more reliable for push)
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # builtin token
+          REPO_PAT: ${{ secrets.REPO_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           BRANCH_NAME: ${{ github.ref_name }}
         run: |
@@ -197,7 +240,6 @@ jobs:
               echo "No changes to commit"
             else
               git commit -m "Update encrypted state (last_seen/state) [ci skip]"
-              # choose auth method: PAT (if provided) else GITHUB_TOKEN
               if [ -n "$REPO_PAT" ]; then
                 echo "Pushing using REPO_PAT"
                 git remote set-url origin "https://x-access-token:${REPO_PAT}@github.com/${GITHUB_REPOSITORY}.git"
@@ -205,16 +247,14 @@ jobs:
                 echo "Pushing using GITHUB_TOKEN"
                 git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
               fi
-              git push origin "HEAD:${BRANCH_NAME}" || (echo "Push failed" && exit 0)
-              echo "Pushed updated secrets/* to repo (branch: ${BRANCH_NAME})"
+              # try push but don't fail the job if push is blocked by branch protection
+              git push origin "HEAD:${BRANCH_NAME}" || echo "Push failed or was blocked (possibly branch protection)."
+              echo "Attempted to push updated secrets/* to repo (branch: ${BRANCH_NAME})"
             fi
           else
             echo "No out/*.enc files to commit"
           fi
-        shell: bash
 
-
-
-
-
-
+      - name: Show finish time
+        if: always()
+        run: echo "Run finished at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
