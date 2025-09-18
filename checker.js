@@ -1,4 +1,5 @@
-// checker.js — полный файл с подсчётом новых сообщений/фот и обработкой больших файлов
+// checker.js — обновлённый: фикс рендера HTML, улучшенный парсер вложений,
+// дедупликация изображений, корректная пометка seen (id + composite hash)
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -21,7 +22,7 @@ const LAST_SEEN_PATH = path.resolve('last_seen.json');
 const ATTACH_SIZE_LIMIT = 50 * 1024 * 1024; // 50 MB
 const MAX_HASH_STORE = 5000;
 
-// ---- last_seen helpers ----
+// helpers
 function loadLastSeen() {
   if (fs.existsSync(LAST_SEEN_PATH)) {
     try { return JSON.parse(fs.readFileSync(LAST_SEEN_PATH, 'utf8')); }
@@ -30,14 +31,9 @@ function loadLastSeen() {
   return { chats: {} };
 }
 function saveLastSeen(obj) {
-  try {
-    fs.writeFileSync(LAST_SEEN_PATH, JSON.stringify(obj, null, 2));
-  } catch (e) {
-    console.warn('Не удалось записать last_seen.json', e && e.message);
-  }
+  try { fs.writeFileSync(LAST_SEEN_PATH, JSON.stringify(obj, null, 2)); }
+  catch (e) { console.warn('Не удалось записать last_seen.json', e && e.message); }
 }
-
-// ---- hashing ----
 function hashSha256Buf(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
@@ -46,17 +42,12 @@ function hashMessageComposite(chatKey, id, text, imgIds = []) {
   const payload = `${chatKey}|text:${text || ''}|imgs:${imgIds.join(',')}`;
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
-
-// ---- formatting ----
 function escapeHtml(s) {
   if (!s) return '';
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// ---- Telegram senders ----
+// Telegram senders — ensure parse_mode: HTML everywhere
 async function sendTelegramTextHTML(html) {
   try {
     const res = await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
@@ -77,6 +68,7 @@ async function sendPhotoBuffer(buffer, filename, contentType, caption) {
   const fd = new FormData();
   fd.append('chat_id', TG_CHAT);
   if (caption) fd.append('caption', caption);
+  fd.append('parse_mode', 'HTML');
   fd.append('photo', buffer, { filename: filename || 'photo.jpg', contentType: contentType || 'image/jpeg' });
   try {
     const res = await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, fd, {
@@ -93,9 +85,10 @@ async function sendPhotoBuffer(buffer, filename, contentType, caption) {
   }
 }
 
-async function sendMediaGroupBuffers(buffers /* [{buffer,name,contentType}] */, captionFirst) {
+async function sendMediaGroupBuffers(buffers /* [{buffer, name, contentType}] */, captionFirst) {
   const fd = new FormData();
   fd.append('chat_id', TG_CHAT);
+  fd.append('parse_mode', 'HTML');
   const media = [];
   for (let i = 0; i < buffers.length && i < 10; i++) {
     const key = `file${i}`;
@@ -118,13 +111,11 @@ async function sendMediaGroupBuffers(buffers /* [{buffer,name,contentType}] */, 
   }
 }
 
-// ---- Playwright download (uses context.request) ----
+// Playwright download (uses context.request)
 async function probeAndDownload(ctxRequest, url) {
   try {
     const resp = await ctxRequest.get(url, { timeout: 30000 });
-    if (!resp.ok()) {
-      return { ok: false, reason: 'http_error', status: resp.status(), url };
-    }
+    if (!resp.ok()) return { ok: false, reason: 'http_error', status: resp.status(), url };
     const headers = resp.headers();
     const ct = headers['content-type'] || 'application/octet-stream';
     const cl = headers['content-length'] ? Number(headers['content-length']) : null;
@@ -134,28 +125,33 @@ async function probeAndDownload(ctxRequest, url) {
       if (m) filename = decodeURIComponent(m[1]);
     }
     if (!filename) {
-      try { filename = path.basename((new URL(url)).pathname) || null; } catch (e) { filename = null; }
+      try { filename = path.basename((new URL(url)).pathname) || null; } catch(e){ filename = null; }
     }
     if (!filename) filename = `file_${Date.now()}`;
-
-    if (cl && cl > ATTACH_SIZE_LIMIT) {
-      return { ok: false, reason: 'too_large', size: cl, contentType: ct, filename, url };
-    }
-
+    if (cl && cl > ATTACH_SIZE_LIMIT) return { ok: false, reason: 'too_large', size: cl, contentType: ct, filename, url };
     const buf = await resp.body();
     if (!buf) return { ok: false, reason: 'no_body', url };
-    if (buf.length > ATTACH_SIZE_LIMIT) {
-      return { ok: false, reason: 'too_large', size: buf.length, contentType: ct, filename, url };
-    }
+    if (buf.length > ATTACH_SIZE_LIMIT) return { ok: false, reason: 'too_large', size: buf.length, contentType: ct, filename, url };
     return { ok: true, buffer: buf, size: buf.length, contentType: ct, filename, url };
   } catch (e) {
     return { ok: false, reason: 'exception', error: e.message, url };
   }
 }
 
-// ---- main ----
+// improved helper to test if an href looks like a file/image link
+function looksLikeFileUrl(href) {
+  if (!href) return false;
+  try {
+    const u = href.toLowerCase();
+    if (u.includes('download') || u.includes('/file/') || u.includes('/uploads/') ) return true;
+    if (u.match(/\.(jpg|jpeg|png|gif|bmp|webp|heic|heif|mp4|pdf|zip)(?:$|\?)/)) return true;
+    return false;
+  } catch (e) { return false; }
+}
+
+// --- main ---
 (async () => {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox','--disable-setuid-sandbox'] });
   const ctxOpts = {};
   if (fs.existsSync(STORAGE_PATH)) ctxOpts.storageState = STORAGE_PATH;
   const context = await browser.newContext(ctxOpts);
@@ -170,7 +166,6 @@ async function probeAndDownload(ctxRequest, url) {
     process.exit(1);
   }
 
-  // selectors
   const chatListSel = config.CHAT_LIST_SELECTOR;
   const chatItemSel = config.CHAT_ITEM_SELECTOR;
   const chatLinkSel = config.CHAT_LINK_SELECTOR || '';
@@ -187,7 +182,6 @@ async function probeAndDownload(ctxRequest, url) {
     process.exit(1);
   }
 
-  // wait & scroll
   try {
     await page.waitForSelector(chatListSel, { timeout: 8000 });
     await page.evaluate(async (params) => {
@@ -219,7 +213,6 @@ async function probeAndDownload(ctxRequest, url) {
         return id ? id : title;
       }, itemHandle);
 
-      // open chat
       if (chatLinkSel) {
         const link = await itemHandle.$(chatLinkSel);
         if (link) await link.click();
@@ -244,7 +237,7 @@ async function probeAndDownload(ctxRequest, url) {
         if (list) list.scrollTop = list.scrollHeight;
       }, msgListSel);
 
-      // extract messages
+      // extract messages with stricter attach detection
       const rawMessages = await page.evaluate((cfg) => {
         const { msgListSel, msgItemSel, msgTextSel, msgTimeSel, chatTitleSel, maxLast } = cfg;
         const container = document.querySelector(msgListSel);
@@ -254,13 +247,31 @@ async function probeAndDownload(ctxRequest, url) {
         const chatEl = document.querySelector(chatTitleSel);
         const chatName = chatEl ? chatEl.innerText.trim() : '—';
 
-        function extractAttachments(el) {
+        function looksLikeFileBlock(b) {
+          // consider a block an attachment only if it contains an <img> OR an <a href> that looks like file
+          if (!b) return false;
+          if (b.querySelector && b.querySelector('img')) return true;
+          const a = b.querySelector && b.querySelector('a[href]');
+          if (a && a.href) {
+            const href = a.href.toLowerCase();
+            if (href.includes('download') || href.includes('/file/') || href.includes('/uploads/') ) return true;
+            if (href.match(/\.(jpg|jpeg|png|gif|bmp|webp|heic|heif|mp4|pdf|zip)(?:$|\?)/)) return true;
+          }
+          // check inner text for "Скачать" or size pattern KB/MB
+          const t = b.innerText ? b.innerText.toLowerCase() : '';
+          if (t.includes('скачать') || t.match(/[\d.,]+\s*(kb|mb|b)/)) return true;
+          return false;
+        }
+
+        function extractAttachmentsStrict(el) {
           const res = [];
-          const blocks = el.querySelectorAll('.attaches, .media, .fileIcon, .grid, .tile, .attach, .attachment');
+          // possible attachment wrappers
+          const blocks = el.querySelectorAll('.attaches, .media, .fileIcon, .grid, .tile, .attach, .attachment, a[href]');
           for (const b of blocks) {
             try {
+              if (!looksLikeFileBlock(b)) continue;
               const img = b.querySelector('img');
-              const url = img ? (img.src || img.getAttribute('data-src') || null) : null;
+              const url = img ? (img.src || img.getAttribute('data-src') || null) : (b.querySelector('a[href]') ? b.querySelector('a[href]').href : null);
               const info = b.innerText ? b.innerText.trim() : null;
               const titleEl = b.querySelector('.title') || b.querySelector('.name') || null;
               const title = titleEl ? titleEl.innerText.trim() : null;
@@ -297,7 +308,7 @@ async function probeAndDownload(ctxRequest, url) {
             if (s) sender = s.innerText.trim();
           } catch (e) {}
           const id = n.getAttribute('data-id') || n.getAttribute('data-index') || n.id || null;
-          const attaches = extractAttachments(n);
+          const attaches = extractAttachmentsStrict(n);
           return { type: 'msg', id, chat: chatName, text, timeRaw, sender, attaches };
         });
       }, { msgListSel, msgItemSel, msgTextSel, msgTimeSel, chatTitleSel, maxLast: MAX_LAST_MESSAGES });
@@ -305,7 +316,6 @@ async function probeAndDownload(ctxRequest, url) {
       if (!lastSeen.chats[chatKey]) lastSeen.chats[chatKey] = [];
       const seenSet = new Set(lastSeen.chats[chatKey]);
 
-      // prepare blocks
       const sendBlocks = [];
 
       for (const raw of rawMessages.slice().reverse()) {
@@ -314,17 +324,15 @@ async function probeAndDownload(ctxRequest, url) {
         const hasContent = (raw.text && raw.text.trim().length) || (raw.attaches && raw.attaches.length);
         if (!hasContent) continue;
 
-        // if id present and seen -> skip
+        // skip by explicit id if already seen
         if (raw.id && seenSet.has(`${chatKey}|id:${raw.id}`)) continue;
 
-        // attachments: download/placeholder logic
         const downloadable = [];
         const placeholders = [];
         if (raw.attaches && raw.attaches.length) {
           for (const att of raw.attaches) {
             const url = att.url;
             if (!url || !(url.startsWith('http://') || url.startsWith('https://'))) {
-              // no accessible URL -> placeholder
               const name = att.title || 'файл';
               placeholders.push({ type: 'file', filename: name, note: 'unavailable' });
               continue;
@@ -339,7 +347,7 @@ async function probeAndDownload(ctxRequest, url) {
           }
         }
 
-        // build image ids for hash (sha for downloaded; for placeholders add filename/url)
+        // build ids from images and placeholders for composite hash
         const imgIds = [];
         for (const dl of downloadable) imgIds.push(hashSha256Buf(dl.buffer));
         for (const ph of placeholders) imgIds.push(`${ph.filename || 'file'}:${ph.note}`);
@@ -347,16 +355,15 @@ async function probeAndDownload(ctxRequest, url) {
         const compositeHash = hashMessageComposite(chatKey, raw.id || null, raw.text || '', imgIds);
         if (seenSet.has(compositeHash)) continue;
 
-        // mark as seen preemptively to avoid duplicates on long runs
+        // conservative: mark both id marker and composite hash
+        if (raw.id) seenSet.add(`${chatKey}|id:${raw.id}`);
         seenSet.add(compositeHash);
 
-        // parts for message (html)
         const parts = [];
         const chatTitle = raw.chat || '—';
         const sender = raw.sender || null;
         const timeStr = raw.timeRaw ? (function parseTime(r){ try { const d = new Date(r); if (!isNaN(d)) return (new Intl.DateTimeFormat('sv-SE',{ timeZone:'Europe/Helsinki', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false }).format(d)).replace(',',''); } catch(e){} return r; })(raw.timeRaw) : null;
 
-        // header lines
         parts.push(`<b>${escapeHtml(chatTitle)}</b>`);
         if (timeStr) parts.push(`<i>${escapeHtml(timeStr)}</i>`);
         if (sender) parts.push(`&quot;${escapeHtml(sender)}&quot;`);
@@ -367,12 +374,12 @@ async function probeAndDownload(ctxRequest, url) {
           id: raw.id,
           compositeHash,
           parts,
-          images: downloadable, // actual images to send
-          placeholders // info about too big/unavailable
+          images: downloadable,
+          placeholders
         });
-      } // end iterating messages
+      }
 
-      // compute counts for this chat
+      // counts
       let newMessagesCount = sendBlocks.length;
       let photosCount = 0;
       let bigFilesCount = 0;
@@ -389,46 +396,35 @@ async function probeAndDownload(ctxRequest, url) {
         console.log(`Чат ${chatKey}: найдено новых ${newMessagesCount} сообщений (${photosCount} фото, ${bigFilesCount} больших/недоступных).`);
       }
 
-      // send each block, oldest-first
-      for (const block of sendBlocks) {
-        try {
-          const captionHtml = block.parts.join('\n\n');
-          // prepend summary for first block of this chat (only once per chat)
-          // we will send summary in the first message for the chat
-          // determine index of block to know if it's the first for this chat
-          const isFirstBlockForChat = true; // we send per block; but we will add top summary only to first send
-          // For simplicity, include counts as header to each block, but to avoid duplication:
-          // we'll compose the summary text once per chat before first send. Simpler approach:
-        } catch (e) {
-          console.warn('Ошибка при подготовке к отправке блока:', e && e.message);
-        }
-      }
-
-      // Instead of sending summary per block, we will send one combined message per chat that
-      // contains summary and then per-block contents (to keep messages tidy).
-
+      // aggregate one message per chat: summary + texts + placeholders; images sent as albums
       if (sendBlocks.length > 0) {
-        // build one aggregated message per chat to preserve original behaviour of "chat once"
         const aggregateParts = [];
-        // summary line
-        aggregateParts.push(`<b>${escapeHtml(sendBlocks[0].parts[0] ? sendBlocks[0].parts[0].replace(/<b>|<\/b>/g,'') : 'Чат')}</b>`);
+        // chat title (bold) from first block (parts[0] contains bolded title)
+        const firstTitleHtml = sendBlocks[0].parts[0] || `<b>${escapeHtml('Чат')}</b>`;
+        // ensure we don't double-escape: firstTitleHtml already contains <b>escapedTitle</b>
+        aggregateParts.push(firstTitleHtml);
         aggregateParts.push(`Найдено новых: ${newMessagesCount} (фото: ${photosCount}, большие/недоступ.: ${bigFilesCount})`);
-        aggregateParts.push(''); // spacer
+        aggregateParts.push('');
 
-        // then append each block textual parts and placeholders; images will be sent separately (media)
-        const aggregatedImages = []; // images buffers to be sent as albums / photos
-        const aggregatedPlaceholders = []; // placeholder lines to append as text
+        const aggregatedImages = [];
+        const aggregatedPlaceholders = [];
+        // use Map for deduplication by hash
+        const seenImageHashes = new Map();
 
         for (const b of sendBlocks) {
-          // include original header/time/sender/text
           const blockText = b.parts.join('\n\n');
           aggregateParts.push(blockText);
 
-          // collect images
           if (b.images && b.images.length) {
-            for (const img of b.images) aggregatedImages.push(img);
+            for (const img of b.images) {
+              const h = hashSha256Buf(img.buffer);
+              if (!seenImageHashes.has(h)) {
+                seenImageHashes.set(h, img);
+                aggregatedImages.push(img);
+              } // else duplicate -> skip
+            }
           }
-          // placeholders -> compact text lines
+
           if (b.placeholders && b.placeholders.length) {
             for (const ph of b.placeholders) {
               if (ph.note === 'too_large') {
@@ -439,53 +435,36 @@ async function probeAndDownload(ctxRequest, url) {
               }
             }
           }
-          aggregateParts.push('──────────────'); // separator between messages
+          aggregateParts.push('──────────────');
         }
 
-        // final text that will be sent as a text message (summary + texts + placeholders)
         const finalText = aggregateParts.join('\n\n') + (aggregatedPlaceholders.length ? '\n\n' + aggregatedPlaceholders.join('\n') : '');
 
-        // send text summary first (or as caption with first image)
+        // send
         try {
           if (aggregatedImages.length === 0) {
-            // just text
             await sendTelegramTextHTML(finalText);
           } else if (aggregatedImages.length === 1) {
-            // single image + caption
             const img = aggregatedImages[0];
             const caption = finalText.length > 1000 ? finalText.slice(0,1000) : finalText;
-            try {
-              await sendPhotoBuffer(img.buffer, img.filename, img.contentType, caption);
-            } catch (e) {
-              // fallback to text + placeholder
-              await sendTelegramTextHTML(finalText + '\n\n📎 Некоторые файлы не отправлены (см. выше).');
-            }
+            try { await sendPhotoBuffer(img.buffer, img.filename, img.contentType, caption); }
+            catch (e) { await sendTelegramTextHTML(finalText + '\n\n📎 Некоторые файлы не отправлены (см. выше).'); }
           } else {
-            // multiple images: send in chunks of 10 as media groups
-            // For the first group include caption (summary)
-            const chunks = [];
+            // send in chunks of 10
             for (let i = 0; i < aggregatedImages.length; i += 10) {
-              chunks.push(aggregatedImages.slice(i, i + 10));
-            }
-            for (let ci = 0; ci < chunks.length; ci++) {
-              const pack = chunks[ci].map((p, ii) => ({ buffer: p.buffer, name: p.filename || `img_${ci}_${ii}.jpg`, contentType: p.contentType }));
-              const caption = (ci === 0 ? (finalText.length > 1000 ? finalText.slice(0,1000) : finalText) : '');
-              try {
-                await sendMediaGroupBuffers(pack, caption);
-              } catch (e) {
-                // on failure send text + note
-                await sendTelegramTextHTML(finalText + '\n\n📎 Некоторые файлы не отправлены (см. выше).');
-                break;
-              }
+              const pack = aggregatedImages.slice(i, i + 10).map((p, ii) => ({ buffer: p.buffer, name: p.filename || `img_${i+ii}.jpg`, contentType: p.contentType }));
+              const caption = (i === 0 ? (finalText.length > 1000 ? finalText.slice(0,1000) : finalText) : '');
+              try { await sendMediaGroupBuffers(pack, caption); }
+              catch (e) { await sendTelegramTextHTML(finalText + '\n\n📎 Некоторые файлы не отправлены (см. выше).'); break; }
               await page.waitForTimeout(400);
             }
           }
         } catch (e) {
           console.warn('Ошибка отправки агрегированного сообщения в Telegram:', e && e.message);
         }
-      } // end if sendBlocks.length>0
+      }
 
-      // persist seen for this chat (cap length)
+      // persist seen for this chat
       lastSeen.chats[chatKey] = Array.from(seenSet).slice(-MAX_HASH_STORE);
       saveLastSeen(lastSeen);
 
@@ -494,15 +473,12 @@ async function probeAndDownload(ctxRequest, url) {
     } catch (err) {
       console.warn('Ошибка при обработке чата index', idx, (err && err.stack) ? err.stack : err);
     }
-  } // end chats
+  }
 
-  // save storageState
   try {
     await context.storageState({ path: STORAGE_PATH });
     console.log('Обновлён storageState.json');
-  } catch (e) {
-    console.warn('Не удалось сохранить storageState:', e && e.message);
-  }
+  } catch (e) { console.warn('Не удалось сохранить storageState:', e && e.message); }
 
   await browser.close();
   console.log('Done.');
