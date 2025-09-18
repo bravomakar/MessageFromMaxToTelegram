@@ -1,69 +1,20 @@
-name: max-check-10min
+name: max-check-15min
 
 on:
-#  schedule:
-#    - cron: "*/10 * * * *"   # каждые 10 минут
   workflow_dispatch:
-    inputs:
-      test_pat:
-        description: 'Проверить REPO_PAT (true/false)'
-        required: false
-        default: 'false'
+  # если хочешь cron, раскомментируй и настроь:
+  # schedule:
+  #   - cron: "*/10 * * * *"
 
 permissions:
-  contents: write
-
-concurrency:
-  group: max-check-10min
-  cancel-in-progress: true
+  contents: read
 
 jobs:
-  # ---------- optional PAT test job ----------
-  pat-check:
-    # запускается только вручную при workflow_dispatch с input test_pat == 'true'
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.test_pat == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Show environment info
-        run: |
-          echo "Run triggered by: $GITHUB_ACTOR / $GITHUB_EVENT_NAME"
-          echo "Testing REPO_PAT availability..."
-
-      - name: Test REPO_PAT by calling GitHub API /user
-        env:
-          REPO_PAT: ${{ secrets.REPO_PAT }}
-        run: |
-          if [ -z "$REPO_PAT" ]; then
-            echo "REPO_PAT secret is not set. Please add it to repository secrets."
-            exit 1
-          fi
-          echo "Calling https://api.github.com/user to verify token..."
-          http_status=$(curl -s -o /tmp/pat_out.json -w "%{http_code}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $REPO_PAT" \
-            https://api.github.com/user)
-
-          echo "HTTP status: $http_status"
-          if [ "$http_status" -ne 200 ]; then
-            echo "PAT test failed. Response:"
-            cat /tmp/pat_out.json || true
-            exit 1
-          fi
-
-          echo "PAT is valid. Authenticated user info:"
-          jq -r '.login, .id, .name' /tmp/pat_out.json || cat /tmp/pat_out.json
-
-  # ---------- main checker job ----------
   check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Show start time
-        run: echo "Run started at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -77,7 +28,7 @@ jobs:
           path: |
             **/node_modules
             ~/.npm
-          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-modules-
 
@@ -86,9 +37,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-browsers-${{ hashFiles('package-lock.json') }}
+          key: ${{ runner.os }}-playwright-browsers-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
-            ${{ runner.os }}-playwright-brows-
+            ${{ runner.os }}-playwright-browsers-
 
       - name: Try to download previous state artifact (max-state) - non-fatal
         uses: actions/download-artifact@v5
@@ -109,38 +60,19 @@ jobs:
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: |
           set -e
-          echo "Attempting to decrypt state from downloaded artifact..."
           if [ -f ./artifact/state.enc ]; then
             openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
           elif [ -f ./secrets/state.enc ]; then
             echo "No artifact found — falling back to repo secrets/state.enc"
             openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/state.enc -out storageState.json -pass pass:"$ENCRYPT_KEY" || true
-          else
-            echo "No state.enc found in artifact or repo; continuing without storageState.json"
           fi
 
-          echo "Attempting to decrypt last_seen..."
           if [ -f ./artifact_lastseen/last_seen.enc ]; then
             openssl enc -d -aes-256-cbc -pbkdf2 -in ./artifact_lastseen/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
           elif [ -f ./secrets/last_seen.enc ]; then
             openssl enc -d -aes-256-cbc -pbkdf2 -in ./secrets/last_seen.enc -out last_seen.json -pass pass:"$ENCRYPT_KEY" || true
           else
-            echo "No last_seen.enc found in artifact or repo; creating default last_seen.json"
             echo '{ "chats": {} }' > last_seen.json
-          fi
-
-      - name: Debug decrypted files
-        run: |
-          echo "=== Debug decrypted files ==="
-          echo "PWD: $(pwd)"
-          echo "storageState.json exists: $( [ -f storageState.json ] && echo yes || echo no )"
-          echo "last_seen.json exists: $( [ -f last_seen.json ] && echo yes || echo no )"
-          echo "ls -la root:"
-          ls -la || true
-          if [ -f last_seen.json ]; then
-            echo "last_seen.json size:" $(wc -c < last_seen.json)
-            echo "last_seen keys (jq):"
-            cat last_seen.json | jq -c '.chats | keys' || cat last_seen.json | head -n 40
           fi
 
       - name: Install dependencies (use lockfile if present) and Playwright browsers if needed
@@ -154,6 +86,12 @@ jobs:
             npm install --no-audit --no-fund
           fi
 
+          # Ensure Playwright package present (in case not in package.json)
+          if ! node -e "require('playwright'); process.exit(0)" 2>/dev/null; then
+            echo "Playwright not found in node_modules -> installing playwright package"
+            npm install playwright --no-audit --no-fund
+          fi
+
           # Install Playwright browsers only if cache miss
           if [ "${{ steps.cache-playwright.outputs.cache-hit }}" != 'true' ]; then
             echo "Playwright browsers cache miss -> installing browsers"
@@ -162,10 +100,19 @@ jobs:
             echo "Playwright browsers restored from cache"
           fi
 
+      - name: Debug installed modules (optional)
+        run: |
+          echo "node version: $(node -v)"
+          echo "npm version: $(npm -v)"
+          echo "ls node_modules (top-level):"
+          ls -la node_modules | head -n 40 || true
+          node -e "try{console.log('playwright ok'); require('playwright');}catch(e){console.log('playwright missing', e && e.message)}"
+
       - name: Run checker
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
+          ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: |
           node checker.js
 
@@ -173,7 +120,6 @@ jobs:
         env:
           ENCRYPT_KEY: ${{ secrets.ENCRYPT_KEY }}
         run: |
-          set -e
           mkdir -p out
           if [ -f storageState.json ]; then
             openssl enc -aes-256-cbc -pbkdf2 -salt -in storageState.json -out out/state.enc -pass pass:"$ENCRYPT_KEY"
@@ -184,76 +130,18 @@ jobs:
 
       - name: Show out/ before upload
         run: |
-          echo "Listing out/ directory:"
           ls -la out || true
-          if [ -f out/last_seen.enc ]; then
-            echo "out/last_seen.enc size:" $(stat -c%s out/last_seen.enc)
-          fi
-          if [ -f out/state.enc ]; then
-            echo "out/state.enc size:" $(stat -c%s out/state.enc)
-          fi
 
-      - name: Upload encrypted state artifact
-        if: always()
+      - name: Upload encrypted state artifact (max-state)
         uses: actions/upload-artifact@v4
         with:
           name: max-state
           path: out/state.enc
+          if-no-files-found: warn
 
-      - name: Upload encrypted last_seen artifact
-        if: always()
+      - name: Upload encrypted last_seen artifact (max-last-seen)
         uses: actions/upload-artifact@v4
         with:
           name: max-last-seen
           path: out/last_seen.enc
-
-      - name: Commit encrypted state back to repo (secrets/) — copy & push (PAT preferred)
-        if: always()
-        env:
-          REPO_PAT: ${{ secrets.REPO_PAT }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          BRANCH_NAME: ${{ github.ref_name }}
-        run: |
-          set -e
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-
-          mkdir -p secrets
-          CHANGED=0
-
-          # copy (not move) so upload has the files
-          if [ -f out/state.enc ]; then
-            cp out/state.enc secrets/state.enc
-            git add secrets/state.enc || true
-            CHANGED=1
-          fi
-          if [ -f out/last_seen.enc ]; then
-            cp out/last_seen.enc secrets/last_seen.enc
-            git add secrets/last_seen.enc || true
-            CHANGED=1
-          fi
-
-          if [ "$CHANGED" -eq 1 ]; then
-            if git diff --cached --quiet; then
-              echo "No changes to commit"
-            else
-              git commit -m "Update encrypted state (last_seen/state) [ci skip]"
-              if [ -n "$REPO_PAT" ]; then
-                echo "Pushing using REPO_PAT"
-                git remote set-url origin "https://x-access-token:${REPO_PAT}@github.com/${GITHUB_REPOSITORY}.git"
-              else
-                echo "Pushing using GITHUB_TOKEN"
-                git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-              fi
-              # try push but don't fail the job if push is blocked by branch protection
-              git push origin "HEAD:${BRANCH_NAME}" || echo "Push failed or was blocked (possibly branch protection)."
-              echo "Attempted to push updated secrets/* to repo (branch: ${BRANCH_NAME})"
-            fi
-          else
-            echo "No out/*.enc files to commit"
-          fi
-
-      - name: Show finish time
-        if: always()
-        run: echo "Run finished at $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+          if-no-files-found: warn
