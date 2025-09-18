@@ -1,4 +1,4 @@
-// checker.js — полный файл с поддержкой пересылки фото в Telegram
+// checker.js — полный файл с подсчётом новых сообщений/фот и обработкой больших файлов
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -10,7 +10,6 @@ const config = require('./config.json');
 
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT = process.env.TG_CHAT;
-const ENCRYPT_KEY = process.env.ENCRYPT_KEY || process.env.ENCRYPT_KEY; // not used here but kept for context
 
 if (!TG_TOKEN || !TG_CHAT) {
   console.error('Нужны переменные окружения TG_TOKEN и TG_CHAT');
@@ -22,7 +21,7 @@ const LAST_SEEN_PATH = path.resolve('last_seen.json');
 const ATTACH_SIZE_LIMIT = 50 * 1024 * 1024; // 50 MB
 const MAX_HASH_STORE = 5000;
 
-// ---- helpers for last_seen ----
+// ---- last_seen helpers ----
 function loadLastSeen() {
   if (fs.existsSync(LAST_SEEN_PATH)) {
     try { return JSON.parse(fs.readFileSync(LAST_SEEN_PATH, 'utf8')); }
@@ -38,18 +37,17 @@ function saveLastSeen(obj) {
   }
 }
 
-// ---- hashing helpers ----
+// ---- hashing ----
 function hashSha256Buf(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 function hashMessageComposite(chatKey, id, text, imgIds = []) {
   if (id) return `${chatKey}|id:${id}`;
-  // stable composite hash
   const payload = `${chatKey}|text:${text || ''}|imgs:${imgIds.join(',')}`;
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
-// ---- formatting helpers ----
+// ---- formatting ----
 function escapeHtml(s) {
   if (!s) return '';
   return String(s)
@@ -80,10 +78,9 @@ async function sendPhotoBuffer(buffer, filename, contentType, caption) {
   fd.append('chat_id', TG_CHAT);
   if (caption) fd.append('caption', caption);
   fd.append('photo', buffer, { filename: filename || 'photo.jpg', contentType: contentType || 'image/jpeg' });
-  const headers = fd.getHeaders();
   try {
     const res = await axios.post(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, fd, {
-      headers,
+      headers: fd.getHeaders(),
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
       timeout: 60000
@@ -96,8 +93,7 @@ async function sendPhotoBuffer(buffer, filename, contentType, caption) {
   }
 }
 
-async function sendMediaGroupBuffers(buffers /* [{buffer, name, contentType}] */, captionFirst) {
-  // Telegram allows up to 10 media in one group
+async function sendMediaGroupBuffers(buffers /* [{buffer,name,contentType}] */, captionFirst) {
   const fd = new FormData();
   fd.append('chat_id', TG_CHAT);
   const media = [];
@@ -122,10 +118,9 @@ async function sendMediaGroupBuffers(buffers /* [{buffer, name, contentType}] */
   }
 }
 
-// ---- Playwright download probe & fetch (uses context.request) ----
+// ---- Playwright download (uses context.request) ----
 async function probeAndDownload(ctxRequest, url) {
   try {
-    // GET — Playwright will follow redirects and include cookies
     const resp = await ctxRequest.get(url, { timeout: 30000 });
     if (!resp.ok()) {
       return { ok: false, reason: 'http_error', status: resp.status(), url };
@@ -133,23 +128,20 @@ async function probeAndDownload(ctxRequest, url) {
     const headers = resp.headers();
     const ct = headers['content-type'] || 'application/octet-stream';
     const cl = headers['content-length'] ? Number(headers['content-length']) : null;
-    // try to get filename from content-disposition
     let filename = null;
     if (headers['content-disposition']) {
       const m = headers['content-disposition'].match(/filename\*?=(?:UTF-8'')?["']?([^;"']+)["']?/i);
       if (m) filename = decodeURIComponent(m[1]);
     }
     if (!filename) {
-      try {
-        filename = path.basename((new URL(url)).pathname) || null;
-      } catch (e) { filename = null; }
+      try { filename = path.basename((new URL(url)).pathname) || null; } catch (e) { filename = null; }
     }
     if (!filename) filename = `file_${Date.now()}`;
 
     if (cl && cl > ATTACH_SIZE_LIMIT) {
       return { ok: false, reason: 'too_large', size: cl, contentType: ct, filename, url };
     }
-    // fetch body as buffer
+
     const buf = await resp.body();
     if (!buf) return { ok: false, reason: 'no_body', url };
     if (buf.length > ATTACH_SIZE_LIMIT) {
@@ -161,7 +153,7 @@ async function probeAndDownload(ctxRequest, url) {
   }
 }
 
-// ---- main script ----
+// ---- main ----
 (async () => {
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
   const ctxOpts = {};
@@ -178,7 +170,7 @@ async function probeAndDownload(ctxRequest, url) {
     process.exit(1);
   }
 
-  // selectors from config
+  // selectors
   const chatListSel = config.CHAT_LIST_SELECTOR;
   const chatItemSel = config.CHAT_ITEM_SELECTOR;
   const chatLinkSel = config.CHAT_LINK_SELECTOR || '';
@@ -195,7 +187,7 @@ async function probeAndDownload(ctxRequest, url) {
     process.exit(1);
   }
 
-  // wait for chat list, scroll to load more
+  // wait & scroll
   try {
     await page.waitForSelector(chatListSel, { timeout: 8000 });
     await page.evaluate(async (params) => {
@@ -220,7 +212,6 @@ async function probeAndDownload(ctxRequest, url) {
   for (let idx = 0; idx < maxPerRun; idx++) {
     const itemHandle = items[idx];
     try {
-      // identify chatKey
       const chatKey = await page.evaluate((el) => {
         const id = el.getAttribute('data-id') || el.getAttribute('data-peer') || el.getAttribute('data-chat-id') || null;
         const titleEl = el.querySelector('.title, .name, .peer, .chat-title') || el.querySelector('a');
@@ -228,7 +219,7 @@ async function probeAndDownload(ctxRequest, url) {
         return id ? id : title;
       }, itemHandle);
 
-      // click open chat
+      // open chat
       if (chatLinkSel) {
         const link = await itemHandle.$(chatLinkSel);
         if (link) await link.click();
@@ -240,7 +231,6 @@ async function probeAndDownload(ctxRequest, url) {
 
       await page.waitForTimeout(config.CLICK_DELAY_MS || 800);
 
-      // wait for messages container
       try {
         await page.waitForSelector(msgListSel, { timeout: 6000 });
       } catch (e) {
@@ -249,13 +239,12 @@ async function probeAndDownload(ctxRequest, url) {
         continue;
       }
 
-      // ensure scrolled to bottom to get newest messages
       await page.evaluate((sel) => {
         const list = document.querySelector(sel);
         if (list) list.scrollTop = list.scrollHeight;
       }, msgListSel);
 
-      // extract messages (id, text, time, sender, attachments)
+      // extract messages
       const rawMessages = await page.evaluate((cfg) => {
         const { msgListSel, msgItemSel, msgTextSel, msgTimeSel, chatTitleSel, maxLast } = cfg;
         const container = document.querySelector(msgListSel);
@@ -267,17 +256,13 @@ async function probeAndDownload(ctxRequest, url) {
 
         function extractAttachments(el) {
           const res = [];
-          // search common attachment patterns
           const blocks = el.querySelectorAll('.attaches, .media, .fileIcon, .grid, .tile, .attach, .attachment');
           for (const b of blocks) {
             try {
-              // find <img>
               const img = b.querySelector('img');
               const url = img ? (img.src || img.getAttribute('data-src') || null) : null;
-              // find textual info/size
               const info = b.innerText ? b.innerText.trim() : null;
-              // get title
-              const titleEl = b.querySelector('.title') || b.querySelector('.name');
+              const titleEl = b.querySelector('.title') || b.querySelector('.name') || null;
               const title = titleEl ? titleEl.innerText.trim() : null;
               res.push({ url, info, title });
             } catch (e) {}
@@ -286,12 +271,10 @@ async function probeAndDownload(ctxRequest, url) {
         }
 
         return lastNodes.map(n => {
-          // check if this is date separator
           if (n.classList && (n.classList.contains('dateSeparator') || n.classList.contains('date'))) {
             const dt = n.innerText ? n.innerText.trim() : null;
             return { type: 'date', date: dt };
           }
-          // otherwise message
           let text = '';
           if (msgTextSel) {
             const t = n.querySelector(msgTextSel);
@@ -302,23 +285,17 @@ async function probeAndDownload(ctxRequest, url) {
             if (tx) text = tx.innerText.trim();
             else text = n.innerText ? n.innerText.trim() : '';
           }
-
           let timeRaw = null;
           if (msgTimeSel) {
             const t = n.querySelector(msgTimeSel);
             if (t) timeRaw = t.getAttribute('datetime') || t.getAttribute('title') || t.innerText || null;
           }
-          if (!timeRaw) {
-            timeRaw = n.getAttribute('data-time') || n.getAttribute('data-ts') || n.getAttribute('title') || null;
-          }
-
-          // try get sender
+          if (!timeRaw) timeRaw = n.getAttribute('data-time') || n.getAttribute('data-ts') || n.getAttribute('title') || null;
           let sender = null;
           try {
             const s = n.querySelector('.header .name .text') || n.querySelector('.header .name') || n.querySelector('.from, .sender');
             if (s) sender = s.innerText.trim();
           } catch (e) {}
-
           const id = n.getAttribute('data-id') || n.getAttribute('data-index') || n.id || null;
           const attaches = extractAttachments(n);
           return { type: 'msg', id, chat: chatName, text, timeRaw, sender, attaches };
@@ -328,167 +305,185 @@ async function probeAndDownload(ctxRequest, url) {
       if (!lastSeen.chats[chatKey]) lastSeen.chats[chatKey] = [];
       const seenSet = new Set(lastSeen.chats[chatKey]);
 
-      // We'll build an array of "send operations" to avoid interleaving multiple sends for a single chat
+      // prepare blocks
       const sendBlocks = [];
 
       for (const raw of rawMessages.slice().reverse()) {
-        if (raw.type === 'date') {
-          // skip date nodes; we will include date from msg.timeRaw if available
-          continue;
-        }
+        if (raw.type === 'date') continue;
         if (raw.type !== 'msg') continue;
-
         const hasContent = (raw.text && raw.text.trim().length) || (raw.attaches && raw.attaches.length);
         if (!hasContent) continue;
 
-        // compute unique id for message
-        // if id present, use it (most robust)
-        const uniqueBase = raw.id || null;
-        // we'll compute image identifiers after potential download
-        // but to decide whether to attempt download we can check url list and previously stored hashes
-        // if uniqueBase present and in seenSet -> skip
-        if (uniqueBase && seenSet.has(`${chatKey}|id:${uniqueBase}`)) continue;
+        // if id present and seen -> skip
+        if (raw.id && seenSet.has(`${chatKey}|id:${raw.id}`)) continue;
 
-        // prepare header parts
-        const chatTitle = raw.chat || '—';
-        const sender = raw.sender || null;
-        const timeStr = raw.timeRaw ? (function parseTime(r){ try { const d = new Date(r); if (!isNaN(d)) return (new Intl.DateTimeFormat('sv-SE',{ timeZone:'Europe/Helsinki', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false }).format(d)).replace(',',''); } catch(e){} return r; })(raw.timeRaw) : null;
-
-        // attachments processing
+        // attachments: download/placeholder logic
         const downloadable = [];
-        const placeholders = []; // strings describing too large or inaccessible files
+        const placeholders = [];
         if (raw.attaches && raw.attaches.length) {
           for (const att of raw.attaches) {
             const url = att.url;
-            // if url is null or not http(s) -> placeholder
             if (!url || !(url.startsWith('http://') || url.startsWith('https://'))) {
-              placeholders.push('Прикреплённая фотография >50МБ или недоступна для просмотра, зайдите в Max');
+              // no accessible URL -> placeholder
+              const name = att.title || 'файл';
+              placeholders.push({ type: 'file', filename: name, note: 'unavailable' });
               continue;
             }
-            // probe & download using context.request
             const info = await probeAndDownload(context.request, url);
             if (!info.ok) {
-              if (info.reason === 'too_large') placeholders.push('Прикреплённая фотография >50МБ или недоступна для просмотра, зайдите в Max');
-              else placeholders.push('Прикреплённая фотография >50МБ или недоступна для просмотра, зайдите в Max');
+              if (info.reason === 'too_large') placeholders.push({ type: 'file', filename: info.filename || path.basename(url), note: 'too_large', size: info.size });
+              else placeholders.push({ type: 'file', filename: info.filename || path.basename(url), note: 'unavailable' });
             } else {
-              // successful download (buffer <= limit)
               downloadable.push({ buffer: info.buffer, filename: info.filename, contentType: info.contentType, size: info.size, url: info.url });
             }
           }
         }
 
-        // compute image-based identifiers for hash
+        // build image ids for hash (sha for downloaded; for placeholders add filename/url)
         const imgIds = [];
-        for (const dl of downloadable) {
-          try {
-            imgIds.push(hashSha256Buf(dl.buffer));
-          } catch (e) {
-            imgIds.push(dl.filename || dl.url || 'img');
-          }
-        }
-        // for placeholders where we couldn't download, use filename/size or url
-        // (this ensures that un-downloadable attachments still affect uniqueness)
-        // We can include att.title or att.info but info may be inconsistent
-        if (raw.attaches && raw.attaches.length) {
-          for (const att of raw.attaches) {
-            if (!att.url || !(att.url.startsWith('http://') || att.url.startsWith('https://'))) {
-              imgIds.push(att.title || att.info || 'attachment');
-            } else {
-              // if we didn't download, add url/marker
-              const found = downloadable.find(d => d.url === att.url);
-              if (!found) imgIds.push(`remote:${att.url}`);
-            }
-          }
-        }
+        for (const dl of downloadable) imgIds.push(hashSha256Buf(dl.buffer));
+        for (const ph of placeholders) imgIds.push(`${ph.filename || 'file'}:${ph.note}`);
 
         const compositeHash = hashMessageComposite(chatKey, raw.id || null, raw.text || '', imgIds);
-
-        // dedupe
         if (seenSet.has(compositeHash)) continue;
 
-        // prepare message blocks to send
+        // mark as seen preemptively to avoid duplicates on long runs
+        seenSet.add(compositeHash);
+
+        // parts for message (html)
         const parts = [];
-        // chat title (once)
+        const chatTitle = raw.chat || '—';
+        const sender = raw.sender || null;
+        const timeStr = raw.timeRaw ? (function parseTime(r){ try { const d = new Date(r); if (!isNaN(d)) return (new Intl.DateTimeFormat('sv-SE',{ timeZone:'Europe/Helsinki', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false }).format(d)).replace(',',''); } catch(e){} return r; })(raw.timeRaw) : null;
+
+        // header lines
         parts.push(`<b>${escapeHtml(chatTitle)}</b>`);
-        // date/time (italic if available)
         if (timeStr) parts.push(`<i>${escapeHtml(timeStr)}</i>`);
-        // sender in quotes
         if (sender) parts.push(`&quot;${escapeHtml(sender)}&quot;`);
-        // text body
         if (raw.text && raw.text.trim()) parts.push(escapeHtml(raw.text.trim()));
 
-        // for downloadable images, we'll create send operations that include buffers
-        // for placeholders -> simple text appended
-
-        // Compose a sendBlock object that describes what to send for this message
         sendBlocks.push({
           chatKey,
           id: raw.id,
           compositeHash,
-          parts, // array of html parts
-          images: downloadable, // array of {buffer, filename, contentType}
-          placeholders // array of placeholder strings
+          parts,
+          images: downloadable, // actual images to send
+          placeholders // info about too big/unavailable
         });
+      } // end iterating messages
 
-        // mark as seen in set now (so if send blocks take long next run won't resend)
-        seenSet.add(compositeHash);
-      } // end messages loop
+      // compute counts for this chat
+      let newMessagesCount = sendBlocks.length;
+      let photosCount = 0;
+      let bigFilesCount = 0;
+      for (const b of sendBlocks) {
+        photosCount += (b.images ? b.images.length : 0);
+        for (const ph of (b.placeholders || [])) {
+          if (ph.note === 'too_large' || ph.note === 'unavailable') bigFilesCount++;
+        }
+      }
 
-      // send accumulated blocks for this chat, oldest-first
+      if (newMessagesCount === 0) {
+        console.log(`Чат ${chatKey}: новых сообщений не найдено.`);
+      } else {
+        console.log(`Чат ${chatKey}: найдено новых ${newMessagesCount} сообщений (${photosCount} фото, ${bigFilesCount} больших/недоступных).`);
+      }
+
+      // send each block, oldest-first
       for (const block of sendBlocks) {
         try {
-          // build caption/text
           const captionHtml = block.parts.join('\n\n');
-          if ((!block.images || block.images.length === 0) && (!block.placeholders || block.placeholders.length === 0)) {
-            // nothing to send? skip
-            continue;
-          }
+          // prepend summary for first block of this chat (only once per chat)
+          // we will send summary in the first message for the chat
+          // determine index of block to know if it's the first for this chat
+          const isFirstBlockForChat = true; // we send per block; but we will add top summary only to first send
+          // For simplicity, include counts as header to each block, but to avoid duplication:
+          // we'll compose the summary text once per chat before first send. Simpler approach:
+        } catch (e) {
+          console.warn('Ошибка при подготовке к отправке блока:', e && e.message);
+        }
+      }
 
-          if (!block.images || block.images.length === 0) {
-            // only placeholders/text -> single text message
-            const finalText = `${captionHtml}\n\n${block.placeholders.join('\n')}`;
+      // Instead of sending summary per block, we will send one combined message per chat that
+      // contains summary and then per-block contents (to keep messages tidy).
+
+      if (sendBlocks.length > 0) {
+        // build one aggregated message per chat to preserve original behaviour of "chat once"
+        const aggregateParts = [];
+        // summary line
+        aggregateParts.push(`<b>${escapeHtml(sendBlocks[0].parts[0] ? sendBlocks[0].parts[0].replace(/<b>|<\/b>/g,'') : 'Чат')}</b>`);
+        aggregateParts.push(`Найдено новых: ${newMessagesCount} (фото: ${photosCount}, большие/недоступ.: ${bigFilesCount})`);
+        aggregateParts.push(''); // spacer
+
+        // then append each block textual parts and placeholders; images will be sent separately (media)
+        const aggregatedImages = []; // images buffers to be sent as albums / photos
+        const aggregatedPlaceholders = []; // placeholder lines to append as text
+
+        for (const b of sendBlocks) {
+          // include original header/time/sender/text
+          const blockText = b.parts.join('\n\n');
+          aggregateParts.push(blockText);
+
+          // collect images
+          if (b.images && b.images.length) {
+            for (const img of b.images) aggregatedImages.push(img);
+          }
+          // placeholders -> compact text lines
+          if (b.placeholders && b.placeholders.length) {
+            for (const ph of b.placeholders) {
+              if (ph.note === 'too_large') {
+                const sizeMB = ph.size ? (Math.round((ph.size/1024/1024)*10)/10) : '>';
+                aggregatedPlaceholders.push(`📎 Файл: ${escapeHtml(ph.filename)} (>50 MB) — откройте в Max`);
+              } else {
+                aggregatedPlaceholders.push(`📎 Файл: ${escapeHtml(ph.filename)} (недоступен) — откройте в Max`);
+              }
+            }
+          }
+          aggregateParts.push('──────────────'); // separator between messages
+        }
+
+        // final text that will be sent as a text message (summary + texts + placeholders)
+        const finalText = aggregateParts.join('\n\n') + (aggregatedPlaceholders.length ? '\n\n' + aggregatedPlaceholders.join('\n') : '');
+
+        // send text summary first (or as caption with first image)
+        try {
+          if (aggregatedImages.length === 0) {
+            // just text
             await sendTelegramTextHTML(finalText);
-          } else if (block.images.length === 1) {
-            // single image — use sendPhoto with caption (caption limited to ~1024 chars)
-            const img = block.images[0];
-            const caption = captionHtml.length > 1000 ? captionHtml.slice(0, 1000) : captionHtml;
+          } else if (aggregatedImages.length === 1) {
+            // single image + caption
+            const img = aggregatedImages[0];
+            const caption = finalText.length > 1000 ? finalText.slice(0,1000) : finalText;
             try {
               await sendPhotoBuffer(img.buffer, img.filename, img.contentType, caption);
             } catch (e) {
-              // fallback: send text + placeholder
-              await sendTelegramTextHTML(`${caption}\n\nПрикреплённая фотография >50МБ или недоступна для просмотра, зайдите в Max`);
-            }
-            if (block.placeholders && block.placeholders.length) {
-              await sendTelegramTextHTML(block.placeholders.join('\n'));
+              // fallback to text + placeholder
+              await sendTelegramTextHTML(finalText + '\n\n📎 Некоторые файлы не отправлены (см. выше).');
             }
           } else {
-            // multiple images — send as media groups in chunks of 10
+            // multiple images: send in chunks of 10 as media groups
+            // For the first group include caption (summary)
             const chunks = [];
-            for (let i = 0; i < block.images.length; i += 10) {
-              chunks.push(block.images.slice(i, i + 10));
+            for (let i = 0; i < aggregatedImages.length; i += 10) {
+              chunks.push(aggregatedImages.slice(i, i + 10));
             }
             for (let ci = 0; ci < chunks.length; ci++) {
               const pack = chunks[ci].map((p, ii) => ({ buffer: p.buffer, name: p.filename || `img_${ci}_${ii}.jpg`, contentType: p.contentType }));
-              const caption = (ci === 0 ? (captionHtml.length > 1000 ? captionHtml.slice(0, 1000) : captionHtml) : '');
+              const caption = (ci === 0 ? (finalText.length > 1000 ? finalText.slice(0,1000) : finalText) : '');
               try {
                 await sendMediaGroupBuffers(pack, caption);
               } catch (e) {
-                // fallback: send text + placeholders
-                await sendTelegramTextHTML(`${caption}\n\nПрикреплённая фотография >50МБ или недоступна для просмотра, зайдите в Max`);
+                // on failure send text + note
+                await sendTelegramTextHTML(finalText + '\n\n📎 Некоторые файлы не отправлены (см. выше).');
+                break;
               }
-              // small pause to avoid rate limits
               await page.waitForTimeout(400);
-            }
-            if (block.placeholders && block.placeholders.length) {
-              await sendTelegramTextHTML(block.placeholders.join('\n'));
             }
           }
         } catch (e) {
-          console.warn('Ошибка при отправке блока в Telegram:', e && e.message);
+          console.warn('Ошибка отправки агрегированного сообщения в Telegram:', e && e.message);
         }
-        // short delay between messages
-        await page.waitForTimeout(200);
-      }
+      } // end if sendBlocks.length>0
 
       // persist seen for this chat (cap length)
       lastSeen.chats[chatKey] = Array.from(seenSet).slice(-MAX_HASH_STORE);
