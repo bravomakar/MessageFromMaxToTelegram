@@ -29,33 +29,34 @@ playwright install
 `
 Чтобы получить chat id надо написать своему боту /start и перейти по ссылке https://api.telegram.org/bot<Вставить сюда токен>/getUpdates, должно получится примерно так: https://api.telegram.org/bot1234:asdas213sad...asdas13/getUpdates
 Вот что будет:
+```bash
 {
-  "ok": true,
-  "result": [
-    {
-      "update_id": 832323232,
-      "message": {
-        "message_id": 123,
-        "from": {
-          "id": 123456789,   // <--- ВОТ ЭТО ВАШ ID
-          "is_bot": false,
-          "first_name": "Имя",
-          "username": "ЮзерНейм",
-          "language_code": "ru"
-        },
-        "chat": {
-          "id": 123456789,
-          "first_name": "Имя",
-          "username": "ЮзерНейм",
-          "type": "private"
-        },
-        "date": 1761502483,
-        "text": "/start"
-        }
-    }
-  ]
-}
-
+\n  "ok": true,
+\n  "result": [
+\n    {
+\n      "update_id": 832323232,
+\n      "message": {
+\n        "message_id": 123,
+\n        "from": {
+\n          "id": 123456789,   // <--- ВОТ ЭТО ВАШ ID
+\n          "is_bot": false,
+\n          "first_name": "Имя",
+\n          "username": "ЮзерНейм",
+\n          "language_code": "ru"
+\n        },
+\n        "chat": {
+\n          "id": 123456789,
+\n          "first_name": "Имя",
+\n          "username": "ЮзерНейм",
+\n          "type": "private"
+\n        },
+\n        "date": 1761502483,
+\n        "text": "/start"
+\n        }
+\n    }
+\n  ]
+\n}
+```
 
 "TELEGRAM_CHAT_ID": "(СЮДА)",
 
