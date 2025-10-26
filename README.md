@@ -31,31 +31,31 @@ playwright install
 Вот что будет:
 ```bash
 {
-\n  "ok": true,
-\n  "result": [
-\n    {
-\n      "update_id": 832323232,
-\n      "message": {
-\n        "message_id": 123,
-\n        "from": {
-\n          "id": 123456789,   // <--- ВОТ ЭТО ВАШ ID
-\n          "is_bot": false,
-\n          "first_name": "Имя",
-\n          "username": "ЮзерНейм",
-\n          "language_code": "ru"
-\n        },
-\n        "chat": {
-\n          "id": 123456789,
-\n          "first_name": "Имя",
-\n          "username": "ЮзерНейм",
-\n          "type": "private"
-\n        },
-\n        "date": 1761502483,
-\n        "text": "/start"
-\n        }
-\n    }
-\n  ]
-\n}
+  "ok": true,
+  "result": [
+    {
+      "update_id": 832323232,
+      "message": {
+        "message_id": 123,
+        "from": {
+          "id": 123456789,   // <--- ВОТ ЭТО ВАШ ID
+          "is_bot": false,
+          "first_name": "Имя",
+          "username": "ЮзерНейм",
+          "language_code": "ru"
+        },
+        "chat": {
+          "id": 123456789,
+          "first_name": "Имя",
+          "username": "ЮзерНейм",
+          "type": "private"
+        },
+        "date": 1761502483,
+        "text": "/start"
+        }
+    }
+  ]
+}
 ```
 
 "TELEGRAM_CHAT_ID": "(СЮДА)",
