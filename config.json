@@ -1,16 +1,8 @@
 {
-  "MAX_WEB": "https://web.max.ru/",
-  "CHAT_LIST_SELECTOR": "aside.aside .scrollListScrollable",   
-  "CHAT_ITEM_SELECTOR": ".item[data-index]",                   
-  "CHAT_LINK_SELECTOR": "",                                   
-  "MSG_LIST_SELECTOR": ".openedChat .content.scrollListContent",
-  "MSG_ITEM_SELECTOR": ".openedChat .item[data-index]",
-  "CHAT_TITLE_SELECTOR": ".openedChat .content .title .name .text",
-  "MSG_TEXT_SELECTOR": ".wrapper .content",
-  "MSG_TIME_SELECTOR": "span.time.svelte-q2jdqb",
-  "MSG_DATE_SELECTOR": "span.date.svelte-3850xr",
-  "MSG_SENDER_SELECTOR": ".header .name .text",
-  "MAX_LAST_MESSAGES": 30,
-  "CLICK_DELAY_MS": 800,
-  "PER_CHAT_PAUSE_MS": 400
+  "TELEGRAM_BOT_TOKEN": "",
+  "TELEGRAM_CHAT_ID": "",
+  "CHECK_INTERVAL_SECONDS": 300,
+
+  "VK_MESSAGES_URL_DM_Giga": "https://web.max.ru/gigachat",
+  "VK_MESSAGES_URL_GROUP_Chat": "(сюда копировать ссылку на чат, пример:https://web.max.ru/-1234556"
 }
